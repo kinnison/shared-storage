@@ -50,4 +50,6 @@ pub enum Error {
     ExpectedFileDataEvent,
     #[error("IO error while adding entry {0:?} into storage: {1:?}")]
     IOErrorAddingToStorage(PathBuf, std::io::Error),
+    #[error("the import stream raised an error: {0}")]
+    ImportStreamError(Box<dyn std::error::Error + Send + Sync + 'static>),
 }

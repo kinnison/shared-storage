@@ -47,6 +47,25 @@ pub struct StorageIdentifier {
     executable: bool,
 }
 
+/// Events yielded to the import process by whatever import stream
+/// is generating them.
+pub enum ImportEvent {
+    /// A directory which needs to be created in the index
+    Directory(PathBuf),
+    /// A file which needs to be creted in the index.
+    /// If the pathbuf is present, then it is the path inside which the file
+    /// should be placed.  The filename is next, and then the size in bytes of
+    /// the file.  Finally the boolean is true if the file needs to be marked
+    /// as executable.  The file's data must not be loaded for this event.
+    File(Option<PathBuf>, OsString, usize, bool),
+    /// The data for the previous File event.  The file's data is not loaded into
+    /// memory until this event is drawn from the stream.
+    FileData(Bytes),
+    /// An error of some kind has occurred in the stream and import should be
+    /// aborted.
+    Error(Box<dyn std::error::Error + Send + Sync + 'static>),
+}
+
 impl StorageIdentifier {
     fn filename(&self, base: &Path) -> PathBuf {
         // Our structure is done as XX/YY/.......
@@ -237,7 +256,7 @@ impl SharedStorage {
         Claim: ResourceAllocation + 'static,
     {
         let mut event_ = content.next().await;
-        while let Some(ref event) = event_ {
+        while let Some(event) = event_.take() {
             // Before we do anything else, try and deal with any inserters
             // who have completed
             loop {
@@ -255,6 +274,7 @@ impl SharedStorage {
                 }
             }
             match event {
+                ImportEvent::Error(e) => throw!(Error::ImportStreamError(e)),
                 ImportEvent::FileData(_) => throw!(Error::UnexpectedFileData),
                 ImportEvent::Directory(d) => {
                     if let Some(dirname) = d.file_name() {
@@ -269,14 +289,14 @@ impl SharedStorage {
                     // We're trying to insert this file, so first we need
                     // an allocation in order to make this possible
                     let mut alloc = loop {
-                        let maybe_alloc = provider.claim(*size).await;
+                        let maybe_alloc = provider.claim(size).await;
                         match maybe_alloc {
                             ResourceClaimResult::Impossible => throw!(Error::ImpossibleFileClaim(
                                 parent_path
                                     .as_deref()
                                     .unwrap_or(Path::new(""))
                                     .join(file_name),
-                                *size
+                                size
                             )),
                             ResourceClaimResult::Busy => {
                                 if let Some((parent_path, file_name, identity)) =
@@ -307,15 +327,16 @@ impl SharedStorage {
                                 tokio::task::spawn(Self::import_file(
                                     alloc,
                                     self.base().to_owned(),
-                                    parent_path.clone(),
-                                    file_name.to_owned(),
-                                    *executable,
+                                    parent_path,
+                                    file_name,
+                                    executable,
                                     bytes,
                                 ))
                                 .map(|r| r.unwrap_or_else(|e| Err(Error::JoinError(e))))
                                 .boxed(),
                             );
                         }
+                        Some(ImportEvent::Error(e)) => throw!(Error::ImportStreamError(e)),
                         _ => {
                             alloc.release().await;
                             throw!(Error::ExpectedFileDataEvent)
@@ -398,12 +419,6 @@ impl SharedStorage {
         allocation.release().await;
         (parent_path, file_name, identity)
     }
-}
-
-pub enum ImportEvent {
-    Directory(PathBuf),
-    File(Option<PathBuf>, OsString, usize, bool),
-    FileData(Bytes),
 }
 
 #[cfg(test)]
