@@ -29,5 +29,6 @@ pub use traits::{ResourceAllocation, ResourceClaimResult, ResourceProvider};
 
 pub mod entry;
 pub mod storage;
+pub use storage::SharedStorage;
 
 pub mod util;
