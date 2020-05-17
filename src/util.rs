@@ -153,11 +153,14 @@ drop_claim_impl!(SimpleResourceAllocation);
 
 /// A filesystem import stream usable with SharedStorage::import
 ///
+#[derive(Debug)]
 pub struct FSImportStream {
     entries: Vec<FSEntry>,
     state: FSIMachine,
+    base_path: PathBuf,
 }
 
+#[derive(Debug)]
 enum FSIMachine {
     Start,
     Finished,
@@ -165,6 +168,7 @@ enum FSIMachine {
     Data(usize),
 }
 
+#[derive(Debug)]
 enum FSEntry {
     Dir(PathBuf),
     File(Option<PathBuf>, OsString, usize, bool),
@@ -180,6 +184,7 @@ impl FSImportStream {
         Self {
             entries,
             state: FSIMachine::Start,
+            base_path,
         }
     }
 
@@ -234,15 +239,16 @@ impl FSImportStream {
                 Finished => None,
                 Data(n) => {
                     if let FSEntry::File(pd, fname, _, _) = &self.entries[n] {
-                        let full_path = if let Some(pd) = pd {
+                        let full_path = self.base_path.join(if let Some(pd) = pd {
                             pd.join(fname)
                         } else {
                             fname.into()
-                        };
+                        });
                         let data = match fs::read(full_path).await {
-                            Ok(fh) => fh,
+                            Ok(data) => data,
                             Err(e) => return Some((ImportEvent::Error(e.into()), self)),
                         };
+                        self.state = Next(n + 1);
                         Some((ImportEvent::FileData(data.into()), self))
                     } else {
                         None
@@ -272,7 +278,7 @@ impl FSImportStream {
     }
 
     pub fn into_stream(self) -> impl Stream<Item = ImportEvent> {
-        unfold(self, Self::next_event)
+        Box::pin(unfold(self, Self::next_event))
     }
 }
 
@@ -289,6 +295,8 @@ fn is_executable(meta: &std::fs::Metadata) -> bool {
 #[cfg(test)]
 mod test {
     use super::*;
+    use futures::stream::StreamExt;
+    use tempfile::TempDir;
 
     #[tokio::test]
     async fn basic_claims() {
@@ -346,5 +354,84 @@ mod test {
     async fn prevented_limited_claim_huge() {
         let res = SimpleResourceProvider::new_with_max_space(1, 10, 50);
         assert!(res.claim(100).await.is_impossible());
+    }
+
+    #[throws(tokio::io::Error)]
+    async fn generate_testdir() -> TempDir {
+        let mut base_path = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+        base_path.push("testing");
+        fs::create_dir_all(&base_path).await?;
+        let tdir = TempDir::new_in(base_path)?;
+
+        let base_path = tdir.path();
+
+        // Prepare a very simple directory structure of stuff
+        fs::create_dir(base_path.join("bin")).await?;
+        fs::create_dir(base_path.join("lib")).await?;
+        fs::create_dir(base_path.join("share")).await?;
+        fs::create_dir(base_path.join("share").join("doc")).await?;
+        // And populate it with a number of files
+        fs::write(base_path.join("README"), "This is the README file\n").await?;
+        fs::write(
+            base_path.join("share/doc/README"),
+            "This is the README file\n",
+        )
+        .await?;
+        fs::write(base_path.join("bin/program"), "This is a program file\n").await?;
+        fs::write(
+            base_path.join("bin/program2"),
+            "This is another program file\n",
+        )
+        .await?;
+        tdir
+    }
+
+    #[tokio::test]
+    async fn check_import_stream() {
+        let tdir = generate_testdir().await.unwrap();
+        let mut fstream = FSImportStream::new(tdir.path())
+            .await
+            .unwrap()
+            .into_stream();
+        // Verify that we meet the rules of the stream
+        let mut dirs = Vec::new();
+        let mut files = Vec::new();
+        let mut expecting_data = false;
+        while let Some(event) = fstream.next().await {
+            match event {
+                ImportEvent::Error(e) => panic!("{:?}", e),
+                ImportEvent::Directory(d) => {
+                    if expecting_data {
+                        panic!("Got directory {:?} when expecting file data", d);
+                    }
+                    dirs.push(d);
+                }
+                ImportEvent::File(pd, fname, size, exec) => {
+                    if expecting_data {
+                        panic!("Got file entry when expecting file data!");
+                    }
+                    files.push((pd, fname, size, exec, None));
+                    expecting_data = true;
+                }
+                ImportEvent::FileData(d) => {
+                    if !expecting_data {
+                        panic!("Got unexpected file data");
+                    }
+                    let lastidx = files.len() - 1;
+                    files[lastidx].4 = Some(d);
+                    expecting_data = false;
+                }
+            }
+        }
+        // Next verify that certain dirs are present etc.
+        // There should be `bin` `lib` `share` and `share/doc`
+        assert!(dirs.contains(&PathBuf::from("bin")));
+        assert!(dirs.contains(&PathBuf::from("lib")));
+        assert!(dirs.contains(&PathBuf::from("share")));
+        assert!(dirs.contains(&PathBuf::from("share/doc")));
+        // Next verify that every file has data
+        for f in &files {
+            assert!(f.4.is_some());
+        }
     }
 }
