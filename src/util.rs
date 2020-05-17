@@ -2,10 +2,19 @@
 //!
 
 use async_trait::async_trait;
+use fehler::throws;
+use futures::future::BoxFuture;
+use futures::stream::unfold;
+use futures::Stream;
+use tokio::fs;
 use tokio::sync::Mutex;
 
+use std::convert::TryFrom;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::storage::ImportEvent;
 use crate::{ResourceAllocation, ResourceClaimResult, ResourceProvider};
 
 type AMSRPInner = Arc<Mutex<SRPInner>>;
@@ -141,6 +150,141 @@ impl ResourceProvider for SimpleResourceProvider {
 }
 
 drop_claim_impl!(SimpleResourceAllocation);
+
+/// A filesystem import stream usable with SharedStorage::import
+///
+pub struct FSImportStream {
+    entries: Vec<FSEntry>,
+    state: FSIMachine,
+}
+
+enum FSIMachine {
+    Start,
+    Finished,
+    Next(usize),
+    Data(usize),
+}
+
+enum FSEntry {
+    Dir(PathBuf),
+    File(Option<PathBuf>, OsString, usize, bool),
+}
+
+impl FSImportStream {
+    #[throws(tokio::io::Error)]
+    pub async fn new<P: AsRef<Path>>(base_path: P) -> Self {
+        let mut entries: Vec<FSEntry> = Vec::new();
+        let mut base_path = base_path.as_ref().to_owned();
+        let mut sub_path = PathBuf::new();
+        Self::scan_dir(&mut base_path, &mut sub_path, &mut entries).await?;
+        Self {
+            entries,
+            state: FSIMachine::Start,
+        }
+    }
+
+    fn scan_dir<'a>(
+        fs_path: &'a mut PathBuf,
+        sub_path: &'a mut PathBuf,
+        entries: &'a mut Vec<FSEntry>,
+    ) -> BoxFuture<'a, Result<(), tokio::io::Error>> {
+        Box::pin(async move {
+            let mut reader = fs::read_dir(&fs_path).await?;
+            while let Some(entry) = reader.next_entry().await? {
+                let meta = entry.metadata().await?;
+                if meta.is_dir() {
+                    fs_path.push(entry.file_name());
+                    sub_path.push(entry.file_name());
+                    entries.push(FSEntry::Dir(sub_path.clone()));
+                    Self::scan_dir(fs_path, sub_path, entries).await?;
+                    fs_path.pop();
+                    sub_path.pop();
+                } else if meta.is_file() {
+                    let executable = is_executable(&meta);
+                    let len: usize = usize::try_from(meta.len())
+                        .expect("Cannot work with files bigger than virtual memory, sorry");
+                    entries.push(FSEntry::File(
+                        if sub_path.parent().is_some() {
+                            Some(sub_path.clone())
+                        } else {
+                            None
+                        },
+                        entry.file_name().clone(),
+                        len,
+                        executable,
+                    ))
+                }
+            }
+            Ok(())
+        })
+    }
+
+    async fn next_event(mut self) -> Option<(ImportEvent, Self)> {
+        use FSIMachine::*;
+        loop {
+            break match std::mem::replace(&mut self.state, Finished) {
+                Start => {
+                    if self.entries.is_empty() {
+                        None
+                    } else {
+                        self.state = Next(0);
+                        continue;
+                    }
+                }
+                Finished => None,
+                Data(n) => {
+                    if let FSEntry::File(pd, fname, _, _) = &self.entries[n] {
+                        let full_path = if let Some(pd) = pd {
+                            pd.join(fname)
+                        } else {
+                            fname.into()
+                        };
+                        let data = match fs::read(full_path).await {
+                            Ok(fh) => fh,
+                            Err(e) => return Some((ImportEvent::Error(e.into()), self)),
+                        };
+                        Some((ImportEvent::FileData(data.into()), self))
+                    } else {
+                        None
+                    }
+                }
+                Next(n) => {
+                    if n == self.entries.len() {
+                        None
+                    } else {
+                        match &self.entries[n] {
+                            FSEntry::Dir(p) => {
+                                self.state = Next(n + 1);
+                                Some((ImportEvent::Directory(p.clone()), self))
+                            }
+                            FSEntry::File(pd, fname, size, exec) => {
+                                self.state = Data(n);
+                                Some((
+                                    ImportEvent::File(pd.clone(), fname.clone(), *size, *exec),
+                                    self,
+                                ))
+                            }
+                        }
+                    }
+                }
+            };
+        }
+    }
+
+    pub fn into_stream(self) -> impl Stream<Item = ImportEvent> {
+        unfold(self, Self::next_event)
+    }
+}
+
+#[cfg(windows)]
+fn is_executable(_meta: &std::fs::Metadata) -> bool {
+    false
+}
+#[cfg(not(windows))]
+fn is_executable(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    (meta.mode() & 0o111) != 0
+}
 
 #[cfg(test)]
 mod test {
