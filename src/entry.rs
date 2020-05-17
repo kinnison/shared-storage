@@ -4,8 +4,9 @@
 use fehler::{throw, throws};
 use serde::{Deserialize, Serialize};
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::convert::{TryFrom, TryInto};
+use std::convert::TryFrom;
 use std::default::Default;
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
@@ -90,6 +91,45 @@ impl Directory {
         }
         here
     }
+
+    #[throws(Error)]
+    pub fn insert_file<S: Into<OsString>>(&mut self, file_name: S, identity: StorageIdentifier) {
+        let file_name = file_name.into();
+        match self.entries.entry(file_name) {
+            Entry::Vacant(v) => {
+                v.insert(DirectoryEntry::File(identity));
+            }
+            Entry::Occupied(v) => match v.get() {
+                DirectoryEntry::Directory(_) => {
+                    throw!(Error::FileEntryExistsAsDirectory(v.key().into()))
+                }
+                DirectoryEntry::File(f) if f != &identity => {
+                    throw!(Error::FileEntryExistsAsFile(v.key().into()))
+                }
+                _ => {}
+            },
+        }
+    }
+
+    #[throws(Error)]
+    pub fn mkdir<S: Into<OsString>>(&mut self, file_name: S) {
+        let file_name = file_name.into();
+        match self.entries.entry(file_name) {
+            Entry::Vacant(v) => {
+                v.insert(DirectoryEntry::Directory(Directory::default()));
+            }
+            Entry::Occupied(v) => match v.get() {
+                DirectoryEntry::File(_) => {
+                    throw!(Error::DirectoryEntryExistsAsFile(v.key().into()))
+                }
+                _ => {}
+            },
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 impl TryFrom<&str> for Directory {
@@ -103,5 +143,16 @@ impl TryFrom<&Directory> for String {
     type Error = serde_json::Error;
     fn try_from(d: &Directory) -> Result<String, Self::Error> {
         serde_json::to_string(d)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[tokio::test]
+    async fn empty_dir() {
+        let dir = Directory::default();
+        assert!(dir.is_empty());
     }
 }

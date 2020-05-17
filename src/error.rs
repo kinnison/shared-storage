@@ -8,6 +8,8 @@ use std::path::PathBuf;
 
 #[derive(Error, Debug)]
 pub enum Error {
+    #[error("threading error of some kind")]
+    JoinError(#[from] tokio::task::JoinError),
     #[error("error while preparing store")]
     Preparing(std::io::Error),
     #[error("entry {0:?} not found in storage index")]
@@ -32,4 +34,20 @@ pub enum Error {
     SerialisingIndex(serde_json::Error),
     #[error("error while writing index file")]
     WritingIndex(PathBuf, std::io::Error),
+    #[error("file data packet out of order when unpacking into storage")]
+    UnexpectedFileData,
+    #[error("entry exists as directory when trying to insert {0:?}")]
+    FileEntryExistsAsDirectory(PathBuf),
+    #[error("entry exists as different file when trying to insert {0:?}")]
+    FileEntryExistsAsFile(PathBuf),
+    #[error("entry exists as a file when trying to make directory {0:?}")]
+    DirectoryEntryExistsAsFile(PathBuf),
+    #[error("attempted to import a file too large for resource provider {0:?} is {1} bytes")]
+    ImpossibleFileClaim(PathBuf, usize),
+    #[error("unexpected end of content when unpacking into storage")]
+    UnexpectedEndOfContent,
+    #[error("expected file data event, got something else when unpacking into storage")]
+    ExpectedFileDataEvent,
+    #[error("IO error while adding entry {0:?} into storage: {1:?}")]
+    IOErrorAddingToStorage(PathBuf, std::io::Error),
 }
