@@ -10,6 +10,22 @@ use crate::{ResourceAllocation, ResourceClaimResult, ResourceProvider};
 
 type AMSRPInner = Arc<Mutex<SRPInner>>;
 
+/// A simple resource provider which offers claim count and memory limits
+///
+/// Since claims often imply file handles, it makes good sense to limit the
+/// number of active claims during an import cycle.  The simple resource
+/// provider will hard-limit based on claim count.  It also makes sense to
+/// limit concurrent memory usage since importing into a storage requires that
+/// the data for the file is held in memory until it has been hashed.  Given
+/// that, the simple resource provider has a size limit.  However it's not
+/// ideal to hard-limit that since single claims might exceed the space requirements
+/// and so we soft-limit RAM so we can't exceed the space limit set unless
+/// it's the only claim.
+///
+/// The SRP is written in an async mode rather then using threaded synchronisation
+/// because it is used exclusively in async environments.
+///
+/// In brief, create one, and give it to the import process you want limited.
 pub struct SimpleResourceProvider {
     inner: AMSRPInner,
 }
@@ -24,6 +40,7 @@ struct SRPInner {
 }
 
 impl SimpleResourceProvider {
+    // Create a resource provider soft-limited on space
     pub fn new(claims: usize, space: usize) -> Self {
         Self {
             inner: Arc::new(Mutex::new(SRPInner {
@@ -34,6 +51,11 @@ impl SimpleResourceProvider {
         }
     }
 
+    // Create a resource provider with a soft-limit and a hard-limit on space
+    // if max_space is smaller than space then individual claims will be limited
+    // to less than the space available
+    // Remember that claim attempts for more than max_space will return Impossible
+    // which will terminate an import process more often than not.
     pub fn new_with_max_space(claims: usize, space: usize, max_space: usize) -> Self {
         Self {
             inner: Arc::new(Mutex::new(SRPInner {
