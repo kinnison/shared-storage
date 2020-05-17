@@ -357,16 +357,18 @@ mod test {
     }
 
     #[throws(tokio::io::Error)]
-    async fn get_tempdir() -> TempDir {
+    async fn get_tempdir(prefix: &str) -> TempDir {
         let mut base_path = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
         base_path.push("testing");
         fs::create_dir_all(&base_path).await?;
-        TempDir::new_in(base_path)?
+        tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir_in(base_path)?
     }
 
     #[throws(tokio::io::Error)]
     async fn generate_testdir() -> TempDir {
-        let tdir = get_tempdir().await?;
+        let tdir = get_tempdir("input").await?;
         let base_path = tdir.path();
 
         // Prepare a very simple directory structure of stuff
@@ -446,13 +448,12 @@ mod test {
             .await
             .unwrap()
             .into_stream();
-        let storage_dir = get_tempdir().await.unwrap();
+        let storage_dir = get_tempdir("storage").await.unwrap();
         let mut storage = crate::SharedStorage::new(storage_dir.path()).await.unwrap();
         let mut linear_loader = crate::util::SimpleResourceProvider::new(1, 1);
         storage
             .import("test-index-1", &mut linear_loader, fstream)
             .await
             .unwrap();
-        println!("Made it to the end");
     }
 }
