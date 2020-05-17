@@ -357,12 +357,16 @@ mod test {
     }
 
     #[throws(tokio::io::Error)]
-    async fn generate_testdir() -> TempDir {
+    async fn get_tempdir() -> TempDir {
         let mut base_path = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
         base_path.push("testing");
         fs::create_dir_all(&base_path).await?;
-        let tdir = TempDir::new_in(base_path)?;
+        TempDir::new_in(base_path)?
+    }
 
+    #[throws(tokio::io::Error)]
+    async fn generate_testdir() -> TempDir {
+        let tdir = get_tempdir().await?;
         let base_path = tdir.path();
 
         // Prepare a very simple directory structure of stuff
@@ -433,5 +437,22 @@ mod test {
         for f in &files {
             assert!(f.4.is_some());
         }
+    }
+
+    #[tokio::test(threaded_scheduler)]
+    async fn verify_importing() {
+        let tdir = generate_testdir().await.unwrap();
+        let fstream = FSImportStream::new(tdir.path())
+            .await
+            .unwrap()
+            .into_stream();
+        let storage_dir = get_tempdir().await.unwrap();
+        let mut storage = crate::SharedStorage::new(storage_dir.path()).await.unwrap();
+        let mut linear_loader = crate::util::SimpleResourceProvider::new(1, 1);
+        storage
+            .import("test-index-1", &mut linear_loader, fstream)
+            .await
+            .unwrap();
+        println!("Made it to the end");
     }
 }
