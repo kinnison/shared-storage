@@ -74,6 +74,7 @@ impl StorageIdentifier {
         // the filename is RESTOFHASH-SIZEx
         // where the x is present if executable
         let mut prefix = base.to_owned();
+        prefix.push(DATA);
         prefix.push(&self.hash[0..2]);
         prefix.push(&self.hash[2..4]);
         prefix.push(format!(
@@ -342,9 +343,9 @@ impl SharedStorage {
                             throw!(Error::ExpectedFileDataEvent)
                         }
                     }
-                    event_ = content.next().await;
                 }
             }
+            event_ = content.next().await;
         }
     }
 
