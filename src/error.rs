@@ -29,9 +29,9 @@ pub enum Error {
     #[error("index {0:?} too large ({1} bytes)")]
     IndexTooLarge(PathBuf, u64),
     #[error("error parsing index")]
-    ParsingIndex(serde_json::Error),
+    ParsingIndex(json5::Error),
     #[error("serialising index")]
-    SerialisingIndex(serde_json::Error),
+    SerialisingIndex(json5::Error),
     #[error("error while writing index file")]
     WritingIndex(PathBuf, std::io::Error),
     #[error("file data packet out of order when unpacking into storage")]

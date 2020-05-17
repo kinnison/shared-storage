@@ -133,16 +133,16 @@ impl Directory {
 }
 
 impl TryFrom<&str> for Directory {
-    type Error = serde_json::Error;
+    type Error = json5::Error;
     fn try_from(s: &str) -> Result<Self, Self::Error> {
-        serde_json::from_str(s)
+        json5::from_str(s)
     }
 }
 
 impl TryFrom<&Directory> for String {
-    type Error = serde_json::Error;
+    type Error = json5::Error;
     fn try_from(d: &Directory) -> Result<String, Self::Error> {
-        serde_json::to_string(d)
+        json5::to_string(d)
     }
 }
 
